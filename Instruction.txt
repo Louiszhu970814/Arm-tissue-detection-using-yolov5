@@ -1,0 +1,3 @@
+cd onedrive\桌面\study\ee\lab\yolo\yolov5
+python train.py --img 128 --batch 64 --epochs 20 --data arm_tissue.yaml --weights yolov5.pt --worker 4
+python detect.py --source ../Dataset/data/videos/case_0001_video_0001.avi --weights runs/train/exp4/weights/best.pt

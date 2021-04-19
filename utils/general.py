@@ -1,4 +1,4 @@
-# General utils
+# YOLOv5 general utils
 
 import glob
 import logging
@@ -13,6 +13,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pandas as pd
 import torch
 import torchvision
 import yaml
@@ -24,6 +25,7 @@ from utils.torch_utils import init_torch_seeds
 # Settings
 torch.set_printoptions(linewidth=320, precision=5, profile='long')
 np.set_printoptions(linewidth=320, formatter={'float_kind': '{:11.5g}'.format})  # format short g, %precision=5
+pd.options.display.max_columns = 10
 cv2.setNumThreads(0)  # prevent OpenCV from multithreading (incompatible with PyTorch DataLoader)
 os.environ['NUMEXPR_MAX_THREADS'] = str(min(os.cpu_count(), 8))  # NumExpr max threads
 
@@ -50,6 +52,11 @@ def get_latest_run(search_dir='.'):
 def isdocker():
     # Is environment a Docker container
     return Path('/workspace').exists()  # or Path('/.dockerenv').exists()
+
+
+def emojis(str=''):
+    # Return platform-dependent emoji-safe version of string
+    return str.encode().decode('ascii', 'ignore') if platform.system() == 'Windows' else str
 
 
 def check_online():
@@ -79,17 +86,38 @@ def check_git_status():
                 f"Use 'git pull' to update or 'git clone {url}' to download latest."
         else:
             s = f'up to date with {url} ✅'
-        print(s.encode().decode('ascii', 'ignore') if platform.system() == 'Windows' else s)
+        print(emojis(s))  # emoji-safe
     except Exception as e:
         print(e)
 
 
-def check_requirements(file='requirements.txt', exclude=()):
-    # Check installed dependencies meet requirements
-    import pkg_resources
-    requirements = [f'{x.name}{x.specifier}' for x in pkg_resources.parse_requirements(Path(file).open())
-                    if x.name not in exclude]
-    pkg_resources.require(requirements)  # DistributionNotFound or VersionConflict exception if requirements not met
+def check_requirements(requirements='requirements.txt', exclude=()):
+    # Check installed dependencies meet requirements (pass *.txt file or list of packages)
+    import pkg_resources as pkg
+    prefix = colorstr('red', 'bold', 'requirements:')
+    if isinstance(requirements, (str, Path)):  # requirements.txt file
+        file = Path(requirements)
+        if not file.exists():
+            print(f"{prefix} {file.resolve()} not found, check failed.")
+            return
+        requirements = [f'{x.name}{x.specifier}' for x in pkg.parse_requirements(file.open()) if x.name not in exclude]
+    else:  # list or tuple of packages
+        requirements = [x for x in requirements if x not in exclude]
+
+    n = 0  # number of packages updates
+    for r in requirements:
+        try:
+            pkg.require(r)
+        except Exception as e:  # DistributionNotFound or VersionConflict if requirements not met
+            n += 1
+            print(f"{prefix} {e.req} not found and is required by YOLOv5, attempting auto-update...")
+            print(subprocess.check_output(f"pip install {e.req}", shell=True).decode())
+
+    if n:  # if packages updated
+        source = file.resolve() if 'file' in locals() else requirements
+        s = f"{prefix} {n} package{'s' * (n > 1)} updated per {source}\n" \
+            f"{prefix} ⚠️ {colorstr('bold', 'Restart runtime or rerun command for updates to take effect')}\n"
+        print(emojis(s))  # emoji-safe
 
 
 def check_img_size(img_size, s=32):
@@ -116,12 +144,12 @@ def check_imshow():
 
 def check_file(file):
     # Search for file if not found
-    if os.path.isfile(file) or file == '':
+    if Path(file).is_file() or file == '':
         return file
     else:
         files = glob.glob('./**/' + file, recursive=True)  # find file
-        assert len(files), 'File Not Found: %s' % file  # assert file was found
-        assert len(files) == 1, "Multiple files match '%s', specify exact path: %s" % (file, files)  # assert unique
+        assert len(files), f'File Not Found: {file}'  # assert file was found
+        assert len(files) == 1, f"Multiple files match '{file}', specify exact path: {files}"  # assert unique
         return files[0]  # return file
 
 
@@ -267,7 +295,7 @@ def segment2box(segment, width=640, height=640):
     x, y = segment.T  # segment xy
     inside = (x >= 0) & (y >= 0) & (x <= width) & (y <= height)
     x, y, = x[inside], y[inside]
-    return np.array([x.min(), y.min(), x.max(), y.max()]) if any(x) else np.zeros((1, 4))  # cls, xyxy
+    return np.array([x.min(), y.min(), x.max(), y.max()]) if any(x) else np.zeros((1, 4))  # xyxy
 
 
 def segments2boxes(segments):
@@ -312,7 +340,7 @@ def clip_coords(boxes, img_shape):
     boxes[:, 3].clamp_(0, img_shape[0])  # y2
 
 
-def bbox_iou(box1, box2, x1y1x2y2=True, GIoU=False, DIoU=False, CIoU=False, eps=1e-9):
+def bbox_iou(box1, box2, x1y1x2y2=True, GIoU=False, DIoU=False, CIoU=False, eps=1e-7):
     # Returns the IoU of box1 to box2. box1 is 4, box2 is nx4
     box2 = box2.T
 
@@ -348,7 +376,7 @@ def bbox_iou(box1, box2, x1y1x2y2=True, GIoU=False, DIoU=False, CIoU=False, eps=
             elif CIoU:  # https://github.com/Zzh-tju/DIoU-SSD-pytorch/blob/master/utils/box/box_utils.py#L47
                 v = (4 / math.pi ** 2) * torch.pow(torch.atan(w2 / h2) - torch.atan(w1 / h1), 2)
                 with torch.no_grad():
-                    alpha = v / ((1 + eps) - iou + v)
+                    alpha = v / (v - iou + (1 + eps))
                 return iou - (rho2 / c2 + v * alpha)  # CIoU
         else:  # GIoU https://arxiv.org/pdf/1902.09630.pdf
             c_area = cw * ch + eps  # convex area
