@@ -8,27 +8,30 @@ from copy import deepcopy
 from pathlib import Path
 from threading import Thread
 
+import torch
 import numpy as np
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
-import torch.utils.data
+from torch.utils.data import ConcatDataset, DataLoader, Dataset
 import yaml
 from torch.cuda import amp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+import PIL.Image as Image
+import torchvision
 
 import test  # import test.py to get mAP after each epoch
 from models.experimental import attempt_load
 from models.yolo import Model
 from utils.autoanchor import check_anchors
-from utils.datasets import create_dataloader
+from utils.datasets import create_dataloader, LoadImagesAndLabels
 from utils.general import labels_to_class_weights, increment_path, labels_to_image_weights, init_seeds, \
     fitness, strip_optimizer, get_latest_run, check_dataset, check_file, check_git_status, check_img_size, \
-    check_requirements, print_mutation, set_logging, one_cycle, colorstr
+    check_requirements, print_mutation, set_logging, one_cycle, colorstr, non_max_suppression, xyxy2xywh
 from utils.google_utils import attempt_download
 from utils.loss import ComputeLoss
 from utils.plots import plot_images, plot_labels, plot_results, plot_evolution
@@ -38,11 +41,71 @@ from utils.wandb_logging.wandb_utils import WandbLogger, check_wandb_resume
 logger = logging.getLogger(__name__)
 
 
+class semiDataset(Dataset):
+    def __init__(self, imgs, target, path):
+        self.imgs = imgs
+        self.target = target
+        self.path = path
+        self.size = None
+
+    def __len__(self):
+        return len(self.imgs)
+
+    def __getitem__(self, index):
+        return self.imgs[index], self.target[index], self.path[index], self.size
+
+
+def getpresudolabel(dataloader, opt, model, device):
+    model.eval()
+    img = []
+    target = []
+    Path = []
+    imgz = opt.img_size
+    # batch_size = opt.batch_size
+    for idx, batch in tqdm(enumerate(dataloader), total=len(dataloader)):
+        imgs0, _, path, _ = batch
+        imgs = imgs0.to(device, non_blocking=True).float() / 255.0
+        
+        with torch.no_grad():
+            pred = model(imgs)[0]
+
+        """Runs Non-Maximum Suppression (NMS) on inference results
+
+        Returns:
+             list of detections, on (n,6) tensor per image [xyxy, conf, cls]
+        """
+        # print(imgs0.size())
+
+        gn = torch.tensor(imgs0.shape)[[3, 2, 3, 2]]
+        pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, classes=opt.classes, agnostic=opt.agnostic_nms)
+        
+        for index, pre in enumerate(pred):
+            predict_number = len(pre)
+            if predict_number==0:
+                continue
+            Class = pre[:,5].view(predict_number,1).cpu()
+            XYWH = (xyxy2xywh(pre[:,:4])).cpu()
+            XYWH/= gn     
+            pre = torch.cat((torch.zeros(predict_number,1),Class,XYWH), dim=1)    
+            img.append(imgs0[index])
+            target.append(pre)
+            Path.append(path[index])
+            
+    print(len(target))
+    dataset = semiDataset(img, target, Path)
+    model.train()
+    return dataset    
+        
+
+
+
+
+
 def train(hyp, opt, device, tb_writer=None):
     logger.info(colorstr('hyperparameters: ') + ', '.join(f'{k}={v}' for k, v in hyp.items()))
     save_dir, epochs, batch_size, total_batch_size, weights, rank = \
         Path(opt.save_dir), opt.epochs, opt.batch_size, opt.total_batch_size, opt.weights, opt.global_rank
-
+    do_semi = opt.do_semi              #### modified
     # Directories
     wdir = save_dir / 'weights'
     wdir.mkdir(parents=True, exist_ok=True)  # make dir
@@ -185,13 +248,24 @@ def train(hyp, opt, device, tb_writer=None):
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(device)
         logger.info('Using SyncBatchNorm()')
 
+
+    ######################   modified  ##########################
     # Trainloader
-    dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt,
+    if do_semi:
+        dataloader, dataset, unlabeldataloader = create_dataloader(train_path, imgsz, batch_size, gs, opt,
+                                                    hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
+                                                    world_size=opt.world_size, workers=opt.workers,
+                                                    image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '), do_semi=opt.do_semi)
+    else:
+        dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt,
                                             hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
                                             world_size=opt.world_size, workers=opt.workers,
-                                            image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '))
+                                            image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '), do_semi=opt.do_semi)
+
     mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # max label class
     nb = len(dataloader)  # number of batches
+
+
     assert mlc < nc, 'Label class %g exceeds nc=%g in %s. Possible class labels are 0-%g' % (mlc, nc, opt.data, nc - 1)
 
     # Process 0
@@ -199,7 +273,7 @@ def train(hyp, opt, device, tb_writer=None):
         testloader = create_dataloader(test_path, imgsz_test, batch_size * 2, gs, opt,  # testloader
                                        hyp=hyp, cache=opt.cache_images and not opt.notest, rect=True, rank=-1,
                                        world_size=opt.world_size, workers=opt.workers,
-                                       pad=0.5, prefix=colorstr('val: '))[0]
+                                       pad=0.5, prefix=colorstr('val: '), do_semi=False)[0]
 
         if not opt.resume:
             labels = np.concatenate(dataset.labels, 0)
@@ -249,6 +323,25 @@ def train(hyp, opt, device, tb_writer=None):
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         model.train()
 
+        if do_semi and epoch>=5:
+            persudodataset = getpresudolabel(unlabeldataloader, opt, model, device)
+            # print(dataset[0][0])
+            # # img = dataset[0][0]
+            # # img = torchvision.transforms.ToPILImage(img)
+            # # img.show()
+            # print(persudodataset[8])
+            # print(persudodataset[8][0])
+            persudodataset = ConcatDataset([dataset,persudodataset])
+            sampler = torch.utils.data.distributed.DistributedSampler(persudodataset) if rank != -1 else None
+            loader = torch.utils.data.DataLoader
+            dataloader = loader(persudodataset,
+                            batch_size=batch_size,
+                            num_workers=opt.workers,
+                            sampler=sampler,
+                            pin_memory=True,
+                            shuffle=True,
+                            collate_fn=LoadImagesAndLabels.collate_fn)
+            nb = len(dataloader)
         # Update image weights (optional)
         if opt.image_weights:
             # Generate indices
@@ -454,13 +547,12 @@ def train(hyp, opt, device, tb_writer=None):
 
 
 if __name__ == '__main__':
-    torch.cuda.empty_cache()
     parser = argparse.ArgumentParser()
     parser.add_argument('--weights', type=str, default='yolov5s.pt', help='initial weights path')
     parser.add_argument('--cfg', type=str, default='', help='model.yaml path')
     parser.add_argument('--data', type=str, default='data/coco128.yaml', help='data.yaml path')
     parser.add_argument('--hyp', type=str, default='data/hyp.scratch.yaml', help='hyperparameters path')
-    parser.add_argument('--epochs', type=int, default=300)
+    parser.add_argument('--epochs', type=int, default=14)
     parser.add_argument('--batch-size', type=int, default=16, help='total batch size for all GPUs')
     parser.add_argument('--img-size', nargs='+', type=int, default=[640, 640], help='[train, test] image sizes')
     parser.add_argument('--rect', action='store_true', help='rectangular training')
@@ -478,7 +570,7 @@ if __name__ == '__main__':
     parser.add_argument('--adam', action='store_true', help='use torch.optim.Adam() optimizer')
     parser.add_argument('--sync-bn', action='store_true', help='use SyncBatchNorm, only available in DDP mode')
     parser.add_argument('--local_rank', type=int, default=-1, help='DDP parameter, do not modify')
-    parser.add_argument('--workers', type=int, default=0, help='maximum number of dataloader workers')
+    parser.add_argument('--workers', type=int, default=8, help='maximum number of dataloader workers')
     parser.add_argument('--project', default='runs/train', help='save to project/name')
     parser.add_argument('--entity', default=None, help='W&B entity')
     parser.add_argument('--name', default='exp', help='save to project/name')
@@ -490,7 +582,22 @@ if __name__ == '__main__':
     parser.add_argument('--bbox_interval', type=int, default=-1, help='Set bounding-box image logging interval for W&B')
     parser.add_argument('--save_period', type=int, default=-1, help='Log model after every "save_period" epoch')
     parser.add_argument('--artifact_alias', type=str, default="latest", help='version of dataset artifact to be used')
+    
+    
+    ##################  modified  ####################
+    parser.add_argument('--conf-thres', type=float, default=0.3, help='object confidence threshold')
+    parser.add_argument('--iou-thres', type=float, default=0.35, help='IOU threshold for NMS')
+    parser.add_argument('--classes', nargs='+', type=int, help='filter by class: --class 0, or --class 0 2 3')
+    parser.add_argument('--agnostic-nms', action='store_true', help='class-agnostic NMS')    
+    parser.add_argument('--do-semi', action='store_true', help='Decide if do semi supervise learning')
+    ##################  modified  #####################
+    
+    
     opt = parser.parse_args()
+
+
+
+
 
     # Set DDP variables
     torch.cuda.empty_cache()
