@@ -85,8 +85,8 @@ def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=Fa
     if do_semi:
         path = path + '../Unlabeled'
         unlabeldataset = LoadImagesAndLabels(path, imgsz, batch_size,
-                                      augment=augment,  # augment images
-                                      hyp=hyp,  # augmentation hyperparameters
+                                      hyp=hyp,
+                                      augment=augment,  # augmentation hyperparameters
                                       rect=rect,  # rectangular training
                                       cache_images=cache,
                                       single_cls=opt.single_cls,
@@ -378,6 +378,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         self.mosaic_border = [-img_size // 2, -img_size // 2]
         self.stride = stride
         self.path = path
+        self.do_semi = do_semi
 
         try:
             f = []  # image files
@@ -417,7 +418,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             tqdm(None, desc=prefix + d, total=n, initial=n)  # display cache results
 
         ###############   modified  ###############   
-        if not do_semi:
+        if not self.do_semi:
             assert nf > 0 or not augment, f'{prefix}No labels in {cache_path}. Can not train without labels. See {help_url}'
 
         ###############   modified  ###############
@@ -545,10 +546,10 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
 
     def __getitem__(self, index):
         index = self.indices[index]  # linear, shuffled, or image_weights
-
+        do_semi = self.do_semi
         hyp = self.hyp
         mosaic = self.mosaic and random.random() < hyp['mosaic']
-        if mosaic:
+        if mosaic and not do_semi:
             # Load mosaic
             img, labels = load_mosaic(self, index)
             #print('mosaic',type(img))

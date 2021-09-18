@@ -18,7 +18,7 @@ obj_pw: 1.0  # obj BCELoss positive_weight
 iou_t: 0.20  # IoU training threshold
 anchor_t: 4.0  # anchor-multiple threshold
 # anchors: 3  # anchors per output layer (0 to ignore)
-fl_gamma: 0.0  # focal loss gamma (efficientDet default gamma=1.5)
+fl_gamma: 1.5  # focal loss gamma (efficientDet default gamma=1.5)
 brightness: 1.0
 contrast: 1.0
 hsv_h: 0.015  # image HSV-Hue augmentation (fraction)
@@ -33,3 +33,19 @@ flipud: 0.0  # image flip up-down (probability)
 fliplr: 0.5  # image flip left-right (probability)
 mosaic: 1.0  # image mosaic (probability)
 mixup: 0.0  # image mixup (probability)
+
+#### Strong Agumantation ####
+
+brightness_strong: 1.0
+contrast_strong: 1.0
+hsv_h_strong: 0.0
+hsv_s_strong: 0.0
+hsv_v_strong: 0.0
+degree_strong: 0.0
+translate_strong: 0.0
+scale_strong: 0.0
+shear_strong: 0.0
+perspective_strong: 0.0
+flipud_strong: 0.0
+fliplr_strong: 0.5
+mosaic_strong: 0.0 
