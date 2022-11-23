@@ -323,21 +323,39 @@ def train(hyp, opt, device, tb_writer=None):
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         model.train()
 
-        if do_semi and epoch>=5:
+        if do_semi and epoch>=4:
             persudodataset = getpresudolabel(unlabeldataloader, opt, model, device)
-            # print(dataset[0][0])
-            # # img = dataset[0][0]
-            # # img = torchvision.transforms.ToPILImage(img)
-            # # img.show()
-            # print(persudodataset[8])
-            # print(persudodataset[8][0])
-            persudodataset = ConcatDataset([dataset,persudodataset])
+            # persudodataset = ConcatDataset([dataset,persudodataset])
+            ########  TO DO  ############
+            # apply strong augmentation on persudodataset
+
+            persudodataset = ConcatDataset([dataset, persudodataset])
+            ########  TO DO  ###########
             sampler = torch.utils.data.distributed.DistributedSampler(persudodataset) if rank != -1 else None
             loader = torch.utils.data.DataLoader
+            ###########   modified  ############
+            # labeled_dataloader = loader(dataset
+            #                 batch_size=batch_size/4,
+            #                 num_workers=opt.workers,
+            #                 sampler=sampler,
+            #                 pin_memory=True,
+            #                 shuffle=False,
+            #                 collate_fn=LoadImagesAndLabels.collate_fn                            )
+            # unlabel_dataloader = loader(persudodataset,
+            #                 batch_size=batch_size,
+            #                 num_workers=opt.workers,
+            #                 sampler=sampler,
+            #                 pin_memory=True,
+            #                 shuffle=False,
+            #                 collate_fn=LoadImagesAndLabels.collate_fn)
+
+            # dataloader = zip(labeled_dataloader, unlabel_dataloader)
+            ###########  modified  #############
+
             dataloader = loader(persudodataset,
                             batch_size=batch_size,
                             num_workers=opt.workers,
-                            sampler=sampler,
+                            sampler=None,
                             pin_memory=True,
                             shuffle=True,
                             collate_fn=LoadImagesAndLabels.collate_fn)
